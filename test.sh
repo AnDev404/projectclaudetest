@@ -235,6 +235,52 @@ get_image_tags() {
     fi
 }
 
+# Function to check if port is in use
+check_port_conflict() {
+    local port=$1
+    local current_service=$2
+    
+    # Check if port is used by other services
+    for service_file in "$SERVICES_DIR"/*.conf; do
+        if [ -f "$service_file" ]; then
+            local service_name=$(basename "$service_file" .conf)
+            if [ "$service_name" != "$current_service" ]; then
+                source "$service_file"
+                if [ "$EXTERNAL_PORT" = "$port" ] || [ "$PORT" = "$port" ]; then
+                    echo "Port $port is already used by service: $service_name"
+                    return 1
+                fi
+            fi
+        fi
+    done
+    
+    # Check if port is used by system
+    if command -v netstat >/dev/null 2>&1; then
+        if netstat -tuln 2>/dev/null | grep -q ":$port "; then
+            echo "Port $port is already in use by system"
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+# Function to suggest available port
+suggest_available_port() {
+    local base_port=$1
+    local current_service=$2
+    
+    for ((i=0; i<100; i++)); do
+        local test_port=$((base_port + i))
+        if check_port_conflict "$test_port" "$current_service"; then
+            echo "$test_port"
+            return 0
+        fi
+    done
+    
+    echo "$((base_port + 100))"
+}
+
 # Function to install a new service
 install_service() {
     clear_screen
@@ -357,10 +403,22 @@ install_service() {
     echo "===================="
     echo
     
+    # Pull image first to detect ports
+    print_colored $YELLOW "Pulling image to detect exposed ports..."
+    if ! UDOCKER_LOGLEVEL=3 udocker pull "$full_image"; then
+        print_colored $RED "Failed to pull image: $full_image"
+        echo
+        read -p "$(print_colored $YELLOW "Press Enter to continue...")"
+        return
+    fi
+
+    # Detect exposed ports from pulled image
+    local detected_ports=$(udocker inspect "$full_image" 2>/dev/null | grep -i "ExposedPorts\|Port" | grep -oE "[0-9]+/tcp" | cut -d'/' -f1 | head -1)
+
     # Default values
     local default_container_name=$(echo "$selected_image" | sed 's/\//_/g')_container
-    local default_port=$((RANDOM % 8000 + 3000))
     local default_window_name=$(echo "$selected_image" | sed 's/\//_/g')
+    local service_name=$(echo "$selected_image" | sed 's/\//_/g')
     
     # Container Name Configuration
     echo "Container Name"
@@ -370,17 +428,67 @@ install_service() {
     echo
     
     # Port Configuration
-    echo "Port Number"
-    echo "Default: $default_port"
-    read -p "$(print_colored $YELLOW "Enter port number (or press Enter for default): ")" user_port
-    local port=${user_port:-$default_port}
-    
-    # Validate port number
-    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
-        print_colored $YELLOW "Invalid port number, using default: $default_port"
-        port=$default_port
+    echo "Port Configuration"
+    if [ -n "$detected_ports" ]; then
+        echo "Detected port from image: $detected_ports"
+        echo "This port will be used for container internal port"
+        
+        # Check if detected port is available
+        local suggested_port=$detected_ports
+        if ! check_port_conflict "$detected_ports" "$service_name"; then
+            suggested_port=$(suggest_available_port "$detected_ports" "$service_name")
+            print_colored $YELLOW "Port $detected_ports is in use. Suggested available port: $suggested_port"
+        fi
+        
+        while true; do
+            read -p "$(print_colored $YELLOW "Enter external port to map to $detected_ports (default: $suggested_port): ")" user_port
+            local external_port=${user_port:-$suggested_port}
+            
+            # Validate port number
+            if ! [[ "$external_port" =~ ^[0-9]+$ ]] || [ "$external_port" -lt 1 ] || [ "$external_port" -gt 65535 ]; then
+                print_colored $RED "Invalid port number (1-65535)"
+                continue
+            fi
+            
+            # Check port conflict
+            if check_port_conflict "$external_port" "$service_name"; then
+                local internal_port=$detected_ports
+                break
+            else
+                print_colored $RED "Port $external_port is already in use!"
+                local alternative=$(suggest_available_port "$external_port" "$service_name")
+                print_colored $YELLOW "Suggested alternative: $alternative"
+            fi
+        done
+    else
+        echo "No ports detected from image"
+        while true; do
+            read -p "$(print_colored $YELLOW "Enter external port: ")" external_port
+            read -p "$(print_colored $YELLOW "Enter internal port: ")" internal_port
+            
+            # Validate port numbers
+            if ! [[ "$external_port" =~ ^[0-9]+$ ]] || [ "$external_port" -lt 1 ] || [ "$external_port" -gt 65535 ]; then
+                print_colored $RED "Invalid external port number (1-65535)"
+                continue
+            fi
+            
+            if ! [[ "$internal_port" =~ ^[0-9]+$ ]] || [ "$internal_port" -lt 1 ] || [ "$internal_port" -gt 65535 ]; then
+                print_colored $RED "Invalid internal port number (1-65535)"
+                continue
+            fi
+            
+            # Check port conflict
+            if check_port_conflict "$external_port" "$service_name"; then
+                break
+            else
+                print_colored $RED "Port $external_port is already in use!"
+                local alternative=$(suggest_available_port "$external_port" "$service_name")
+                print_colored $YELLOW "Suggested alternative: $alternative"
+            fi
+        done
     fi
-    echo
+
+    local port=$external_port
     
     # Window Name Configuration
     echo "Window Name"
@@ -394,7 +502,7 @@ install_service() {
     echo "==================="
     echo "Image     : $full_image"
     echo "Container : $container_name"
-    echo "Port      : $port"
+    echo "Port Mapping: $external_port:$internal_port"
     echo "Window    : $window_name"
     echo
     
@@ -418,15 +526,8 @@ install_service() {
         fi
     fi
     
-    print_colored $YELLOW "Downloading and installing: $full_image"
-    
-    # Pull the image
-    if ! UDOCKER_LOGLEVEL=3 udocker pull "$full_image"; then
-        print_colored $RED "Failed to pull image: $full_image"
-        echo
-        read -p "$(print_colored $YELLOW "Press Enter to continue...")"
-        return
-    fi
+    print_colored $YELLOW "Creating container from pulled image: $full_image"
+    # Image already pulled during port detection
     
     # Create container
     if ! UDOCKER_LOGLEVEL=3 udocker create --name="$container_name" "$full_image"; then
@@ -453,6 +554,8 @@ install_service() {
 SERVICE_NAME=$service_name
 IMAGE=$full_image
 CONTAINER_NAME=$container_name
+EXTERNAL_PORT=$external_port
+INTERNAL_PORT=$internal_port
 PORT=$port
 WINDOW_NAME=$window_name
 DATA_DIR=$service_data_dir
@@ -570,8 +673,9 @@ start_service() {
         # Rename the default window (window 0) to our service name
         tmux rename-window -t "$TMUX_SESSION:0" "$service_name"
         
-        # Build the udocker run command
-        local run_command="cd ~/Termux-Udocker && UDOCKER_LOGLEVEL=3 udocker run -p $PORT:3000 -v \"$DATA_DIR\":/app/.sessions \"$CONTAINER_NAME\""
+        # Use stored port configuration
+        local port_mapping="$EXTERNAL_PORT:$INTERNAL_PORT"
+        local run_command="cd ~/Termux-Udocker && UDOCKER_LOGLEVEL=3 udocker run -p $port_mapping -v \"$DATA_DIR\":/app/.sessions \"$CONTAINER_NAME\""
         
         # Send the command to the existing window (window 0)
         tmux send-keys -t "$TMUX_SESSION:$service_name" "$run_command" C-m
@@ -579,8 +683,9 @@ start_service() {
         # Session exists, create new window for the service
         tmux new-window -t "$TMUX_SESSION" -n "$service_name"
         
-        # Build the udocker run command
-        local run_command="cd ~/Termux-Udocker && UDOCKER_LOGLEVEL=3 udocker run -p $PORT:3000 -v \"$DATA_DIR\":/app/.sessions \"$CONTAINER_NAME\""
+        # Use stored port configuration
+        local port_mapping="$EXTERNAL_PORT:$INTERNAL_PORT"
+        local run_command="cd ~/Termux-Udocker && UDOCKER_LOGLEVEL=3 udocker run -p $port_mapping -v \"$DATA_DIR\":/app/.sessions \"$CONTAINER_NAME\""
         
         # Send the command to the new window
         tmux send-keys -t "$TMUX_SESSION:$service_name" "$run_command" C-m
