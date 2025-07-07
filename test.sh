@@ -135,27 +135,72 @@ detect_image_ports() {
     
     # Create temporary container for inspection
     if UDOCKER_LOGLEVEL=3 udocker create --name="$temp_container" "$full_image" >/dev/null 2>&1; then
-        # Try to get port information from container
-        local port_info=$(UDOCKER_LOGLEVEL=3 udocker inspect "$temp_container" 2>/dev/null | grep -i "ExposedPorts\|Port" | head -5)
+        
+        # Get full inspect output
+        local inspect_output=$(UDOCKER_LOGLEVEL=3 udocker inspect "$temp_container" 2>/dev/null)
         
         # Clean up temporary container
         udocker rm "$temp_container" >/dev/null 2>&1
         
-        # Parse port information
-        if [ -n "$port_info" ]; then
-            # Extract port numbers from the output
-            local detected_ports=$(echo "$port_info" | grep -o '[0-9]\+' | sort -u | head -3)
-            if [ -n "$detected_ports" ]; then
-                echo "$detected_ports"
-                return
-            fi
+        # Try multiple methods to extract port information
+        local detected_ports=""
+        
+        # Method 1: Look for EXPOSE directive patterns
+        local expose_ports=$(echo "$inspect_output" | grep -i "expose\|port" | grep -o '[0-9]\+/tcp\|[0-9]\+/udp\|[0-9]\+' | grep -o '[0-9]\+' | sort -u)
+        
+        # Method 2: Look for common port patterns in different formats
+        if [ -z "$expose_ports" ]; then
+            expose_ports=$(echo "$inspect_output" | grep -oE '"[0-9]+/(tcp|udp)"' | grep -o '[0-9]\+' | sort -u)
+        fi
+        
+        # Method 3: Look for port numbers in JSON-like structures
+        if [ -z "$expose_ports" ]; then
+            expose_ports=$(echo "$inspect_output" | grep -oE '[0-9]+\s*:\s*\{\}' | grep -o '[0-9]\+' | sort -u)
+        fi
+        
+        # Filter out common non-port numbers (0, 1, very high numbers)
+        if [ -n "$expose_ports" ]; then
+            detected_ports=$(echo "$expose_ports" | while read port; do
+                if [ "$port" -gt 1 ] && [ "$port" -lt 65536 ]; then
+                    echo "$port"
+                fi
+            done | head -3)
+        fi
+        
+        # Return the first valid port found
+        if [ -n "$detected_ports" ]; then
+            echo "$detected_ports" | head -1
+            return
         fi
     fi
     
-    # If detection fails, return empty
+    # If all methods fail, try to run container briefly to see what ports it tries to use
+    local temp_run_container="${container_name}_temp_run"
+    
+    # Try to create and run container briefly
+    if UDOCKER_LOGLEVEL=3 udocker create --name="$temp_run_container" "$full_image" >/dev/null 2>&1; then
+        # Try to run container for a few seconds to see startup messages
+        local run_output=$(timeout 10 UDOCKER_LOGLEVEL=3 udocker run "$temp_run_container" 2>&1 | head -20)
+        
+        # Clean up
+        udocker rm "$temp_run_container" >/dev/null 2>&1
+        
+        # Look for port mentions in startup output
+        local startup_ports=$(echo "$run_output" | grep -i "listening\|server\|port\|bind" | grep -o '[0-9]\+' | while read port; do
+            if [ "$port" -gt 1 ] && [ "$port" -lt 65536 ]; then
+                echo "$port"
+            fi
+        done | head -1)
+        
+        if [ -n "$startup_ports" ]; then
+            echo "$startup_ports"
+            return
+        fi
+    fi
+    
+    # If everything fails, return empty
     echo ""
 }
-
 # Function to check if port is already in use
 check_port_conflict() {
     local port=$1
