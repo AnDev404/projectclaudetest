@@ -130,77 +130,90 @@ detect_image_ports() {
     local full_image=$1
     local container_name=$2
     
-    # Try to inspect the image to get exposed ports
-    local temp_container="${container_name}_temp_inspect"
+    # Method 1: Try to get port from udocker image info
+    local image_info=$(UDOCKER_LOGLEVEL=3 udocker images 2>/dev/null | grep "$full_image")
     
-    # Create temporary container for inspection
+    # Method 2: Create temporary container and try to run it briefly to see what ports it tries to use
+    local temp_container="${container_name}_temp_port_detect"
+    
     if UDOCKER_LOGLEVEL=3 udocker create --name="$temp_container" "$full_image" >/dev/null 2>&1; then
-        
-        # Get full inspect output
+        # Try to get dockerfile or image configuration
         local inspect_output=$(UDOCKER_LOGLEVEL=3 udocker inspect "$temp_container" 2>/dev/null)
         
         # Clean up temporary container
         udocker rm "$temp_container" >/dev/null 2>&1
         
-        # Try multiple methods to extract port information
-        local detected_ports=""
-        
-        # Method 1: Look for EXPOSE directive patterns
-        local expose_ports=$(echo "$inspect_output" | grep -i "expose\|port" | grep -o '[0-9]\+/tcp\|[0-9]\+/udp\|[0-9]\+' | grep -o '[0-9]\+' | sort -u)
-        
-        # Method 2: Look for common port patterns in different formats
-        if [ -z "$expose_ports" ]; then
-            expose_ports=$(echo "$inspect_output" | grep -oE '"[0-9]+/(tcp|udp)"' | grep -o '[0-9]\+' | sort -u)
-        fi
-        
-        # Method 3: Look for port numbers in JSON-like structures
-        if [ -z "$expose_ports" ]; then
-            expose_ports=$(echo "$inspect_output" | grep -oE '[0-9]+\s*:\s*\{\}' | grep -o '[0-9]\+' | sort -u)
-        fi
-        
-        # Filter out common non-port numbers (0, 1, very high numbers)
-        if [ -n "$expose_ports" ]; then
-            detected_ports=$(echo "$expose_ports" | while read port; do
-                if [ "$port" -gt 1 ] && [ "$port" -lt 65536 ]; then
-                    echo "$port"
-                fi
-            done | head -3)
-        fi
-        
-        # Return the first valid port found
-        if [ -n "$detected_ports" ]; then
-            echo "$detected_ports" | head -1
-            return
+        # Look for port patterns in the inspect output
+        if [ -n "$inspect_output" ]; then
+            # Search for various port patterns
+            local ports=$(echo "$inspect_output" | grep -oE '\"[0-9]+/tcp\"' | grep -oE '[0-9]+' | sort -u)
+            
+            if [ -z "$ports" ]; then
+                # Try different pattern
+                ports=$(echo "$inspect_output" | grep -oE '[0-9]+/tcp' | grep -oE '[0-9]+' | sort -u)
+            fi
+            
+            if [ -z "$ports" ]; then
+                # Try to find EXPOSE instructions or port mentions
+                ports=$(echo "$inspect_output" | grep -i -oE 'EXPOSE [0-9]+' | grep -oE '[0-9]+' | sort -u)
+            fi
+            
+            if [ -z "$ports" ]; then
+                # Look for any port numbers in the config
+                ports=$(echo "$inspect_output" | grep -oE '\b[0-9]{2,5}\b' | sort -u | head -5)
+                
+                # Filter out obviously wrong ports (like years, sizes, etc)
+                local filtered_ports=""
+                for port in $ports; do
+                    if [ "$port" -ge 80 ] && [ "$port" -le 65535 ]; then
+                        if [ -z "$filtered_ports" ]; then
+                            filtered_ports="$port"
+                        else
+                            filtered_ports="$filtered_ports\n$port"
+                        fi
+                    fi
+                done
+                ports="$filtered_ports"
+            fi
+            
+            # Return the first valid port found
+            if [ -n "$ports" ]; then
+                echo "$ports" | head -1
+                return
+            fi
         fi
     fi
     
-    # If all methods fail, try to run container briefly to see what ports it tries to use
-    local temp_run_container="${container_name}_temp_run"
-    
-    # Try to create and run container briefly
-    if UDOCKER_LOGLEVEL=3 udocker create --name="$temp_run_container" "$full_image" >/dev/null 2>&1; then
-        # Try to run container for a few seconds to see startup messages
-        local run_output=$(timeout 10 UDOCKER_LOGLEVEL=3 udocker run "$temp_run_container" 2>&1 | head -20)
+    # Method 3: Try to start container briefly and check what happens
+    if UDOCKER_LOGLEVEL=3 udocker create --name="$temp_container" "$full_image" >/dev/null 2>&1; then
+        # Try to setup the container
+        UDOCKER_LOGLEVEL=3 udocker setup --execmode=P1 "$temp_container" >/dev/null 2>&1
+        
+        # Try to run it briefly and capture any port-related output
+        local run_output=$(timeout 10 UDOCKER_LOGLEVEL=3 udocker run "$temp_container" 2>&1 | head -20)
         
         # Clean up
-        udocker rm "$temp_run_container" >/dev/null 2>&1
+        udocker rm "$temp_container" >/dev/null 2>&1
         
-        # Look for port mentions in startup output
-        local startup_ports=$(echo "$run_output" | grep -i "listening\|server\|port\|bind" | grep -o '[0-9]\+' | while read port; do
-            if [ "$port" -gt 1 ] && [ "$port" -lt 65536 ]; then
-                echo "$port"
+        # Look for common port patterns in startup output
+        if [ -n "$run_output" ]; then
+            local startup_ports=$(echo "$run_output" | grep -oE '(port|listening|bind|serve).{0,20}[0-9]+' | grep -oE '[0-9]+' | sort -u)
+            
+            if [ -z "$startup_ports" ]; then
+                startup_ports=$(echo "$run_output" | grep -oE ':[0-9]+' | grep -oE '[0-9]+' | sort -u)
             fi
-        done | head -1)
-        
-        if [ -n "$startup_ports" ]; then
-            echo "$startup_ports"
-            return
+            
+            if [ -n "$startup_ports" ]; then
+                echo "$startup_ports" | head -1
+                return
+            fi
         fi
     fi
     
-    # If everything fails, return empty
+    # If all methods fail, return empty
     echo ""
 }
+
 # Function to check if port is already in use
 check_port_conflict() {
     local port=$1
@@ -477,8 +490,8 @@ install_service() {
     local detected_ports=$(detect_image_ports "$full_image" "$container_name")
     local suggested_port=""
     local internal_port=""
-    
-    if [ -n "$detected_ports" ]; then
+        
+    if [ -n "$detected_ports" ] && [ "$detected_ports" != "0" ] && [ "$detected_ports" != "" ]; then
         # Get first detected port as suggestion
         suggested_port=$(echo "$detected_ports" | head -1)
         internal_port="$suggested_port"
