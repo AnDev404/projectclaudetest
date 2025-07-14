@@ -13,7 +13,7 @@ apt install -y apache2 \
   php8.2-common php8.2-ldap \
   mariadb-server wget unzip
 
-# 2. Aktifkan modul Apache & PHP-FPM
+# 2. Aktifkan modul Apache & konfigurasi PHP-FPM
 log "Enable Apache modules & PHP-FPM"
 a2enmod proxy_fcgi setenvif rewrite
 a2enconf php8.2-fpm
@@ -22,10 +22,13 @@ a2enconf php8.2-fpm
 log "Set Apache Listen → 8080"
 sed -i 's/^Listen 80/Listen 8080/' /etc/apache2/ports.conf
 
-# 4. Load env vars Apache
+# 4. Pastikan session.cookie_httponly aktif di php.ini
+sed -i 's/^;*session.cookie_httponly.*/session.cookie_httponly = On/' /etc/php/8.2/fpm/php.ini
+
+# 5. Load Apache environment
 set +u; source /etc/apache2/envvars; set -u
 
-# 5. Unduh & ekstrak GLPI
+# 6. Unduh & ekstrak GLPI
 VER=$(wget -qO- https://api.github.com/repos/glpi-project/glpi/releases/latest \
      | grep '"tag_name":' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
 log "Download GLPI versi $VER"
@@ -37,7 +40,7 @@ rm -rf /var/www/html/glpi
 mkdir -p /var/www/html/glpi
 tar xf /tmp/glpi.tgz -C /var/www/html/glpi --strip-components=1
 
-# 6. Relokasi folder files
+# 7. Relokasi folder files
 log "Relocate files folder"
 mkdir -p /var/lib/glpi/files
 if [ -d /var/www/html/glpi/files ]; then
@@ -47,13 +50,13 @@ fi
 ln -sf /var/lib/glpi/files /var/www/html/glpi/files
 chown -R www-data:www-data /var/lib/glpi/files
 
-# 7. Set permission GLPI
+# 8. Set permission
 log "Set ownership & perms"
 chown -R www-data:www-data /var/www/html/glpi
 find /var/www/html/glpi -type d -exec chmod 755 {} \;
 find /var/www/html/glpi -type f -exec chmod 644 {} \;
 
-# 8. Jalankan MariaDB tanpa systemd
+# 9. Jalankan MariaDB (tanpa systemd)
 log "Setup MariaDB manual"
 mkdir -p /run/mysqld
 chown mysql:mysql /run/mysqld
@@ -63,13 +66,13 @@ fi
 mysqld_safe --datadir=/var/lib/mysql --pid-file=/run/mysqld/mysqld.pid &
 sleep 10
 
-# 9. Buat database & user
+# 10. Buat database & user
 log "Create DB & user GLPI"
 mysql -uroot -e "CREATE DATABASE IF NOT EXISTS glpi CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 mysql -uroot -e "CREATE USER IF NOT EXISTS 'glpiuser'@'localhost' IDENTIFIED BY 'glpipass';"
 mysql -uroot -e "GRANT ALL PRIVILEGES ON glpi.* TO 'glpiuser'@'localhost'; FLUSH PRIVILEGES;"
 
-# 10. Virtual host Apache
+# 11. Virtual host Apache (tanpa php_admin_value)
 log "Configure Apache vhost"
 cat > /etc/apache2/sites-available/glpi.conf << 'VHOST'
 <VirtualHost *:8080>
@@ -78,7 +81,6 @@ cat > /etc/apache2/sites-available/glpi.conf << 'VHOST'
     AllowOverride All
     Require all granted
   </Directory>
-  php_admin_value session.cookie_httponly On
   ErrorLog ${APACHE_LOG_DIR}/glpi_error.log
   CustomLog ${APACHE_LOG_DIR}/glpi_access.log combined
 </VirtualHost>
@@ -87,12 +89,12 @@ VHOST
 a2dissite 000-default
 a2ensite glpi
 
-# 11. Restart semua service
+# 12. Restart service
 log "Restart PHP-FPM & Apache"
 service php8.2-fpm restart
 service apache2 restart
 
-# 12. Tambahkan startup otomatis ke bashrc
+# 13. Tambahkan ke bashrc untuk autostart di proot
 echo "service apache2 start"    >> /root/.bashrc
 echo "service php8.2-fpm start" >> /root/.bashrc
 echo "mysqld_safe --datadir=/var/lib/mysql --pid-file=/run/mysqld/mysqld.pid &" >> /root/.bashrc
