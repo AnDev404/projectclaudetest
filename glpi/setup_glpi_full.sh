@@ -22,7 +22,7 @@ a2enconf php8.2-fpm
 log "Set Apache Listen → 8080"
 sed -i 's/^Listen 80/Listen 8080/' /etc/apache2/ports.conf
 
-# 4. Pastikan session.httponly aktif di php.ini
+# 4. Pastikan session.cookie_httponly aktif di php.ini
 sed -i 's/^;*session.cookie_httponly.*/session.cookie_httponly = On/' /etc/php/8.2/fpm/php.ini
 
 # 5. Load Apache environment
@@ -50,7 +50,7 @@ fi
 ln -sf /var/lib/glpi/files /var/www/html/glpi/files
 chown -R www-data:www-data /var/lib/glpi/files
 
-# 8. Set permission
+# 8. Set permission pada folder & file
 log "Set ownership & perms"
 chown -R www-data:www-data /var/www/html/glpi
 find /var/www/html/glpi -type d -exec chmod 755 {} \;
@@ -66,21 +66,27 @@ fi
 mysqld_safe --datadir=/var/lib/mysql --pid-file=/run/mysqld/mysqld.pid &
 sleep 10
 
-# 10. Buat DB & user
+# 10. Buat DB & user GLPI
 log "Create DB & user GLPI"
 mysql -uroot -e "CREATE DATABASE IF NOT EXISTS glpi CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 mysql -uroot -e "CREATE USER IF NOT EXISTS 'glpiuser'@'localhost' IDENTIFIED BY 'glpipass';"
 mysql -uroot -e "GRANT ALL PRIVILEGES ON glpi.* TO 'glpiuser'@'localhost'; FLUSH PRIVILEGES;"
 
-# 11. Konfigurasi virtual host Apache (tanpa php_admin_value)
+# 11. Konfigurasi VirtualHost Apache (DocumentRoot fixed)
 log "Configure Apache vhost"
 cat > /etc/apache2/sites-available/glpi.conf << 'VHOST'
 <VirtualHost *:8080>
-  DocumentRoot /var/www/html/glpi/public
-  <Directory /var/www/html/glpi/public>
+  ServerName localhost
+
+  DocumentRoot /var/www/html/glpi
+  <Directory /var/www/html/glpi>
+    Options Indexes FollowSymLinks
     AllowOverride All
     Require all granted
   </Directory>
+
+  DirectoryIndex index.php
+
   ErrorLog ${APACHE_LOG_DIR}/glpi_error.log
   CustomLog ${APACHE_LOG_DIR}/glpi_access.log combined
 </VirtualHost>
@@ -89,12 +95,12 @@ VHOST
 a2dissite 000-default
 a2ensite glpi
 
-# 12. Restart service
+# 12. Restart services
 log "Restart PHP-FPM & Apache"
 /etc/init.d/php8.2-fpm restart || service php8.2-fpm restart
 /etc/init.d/apache2 restart   || service apache2 restart
 
-# 13. Tambahkan autostart ke bashrc
+# 13. Tambahkan autostart ke .bashrc
 log "Tambahkan autostart ke .bashrc"
 grep -qxF "service apache2 start"    /root/.bashrc || echo "service apache2 start" >> /root/.bashrc
 grep -qxF "service php8.2-fpm start" /root/.bashrc || echo "service php8.2-fpm start" >> /root/.bashrc
