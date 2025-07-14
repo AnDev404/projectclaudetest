@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+log "=== Mulai setup LAMP & GLPI (port 8080) ==="
+
+# 1. Update & install semua dependensi yang dibutuhkan
+apt update -y
+apt install -y apache2 \
+  php8.2-fpm php8.2-mysql php8.2-xml php8.2-curl \
+  php8.2-gd php8.2-intl php8.2-zip php8.2-bz2 \
+  php8.2-common php8.2-ldap \
+  mariadb-server wget unzip
+
+# 2. Aktifkan modul Apache & konfigurasi PHP-FPM
+log "Enable Apache modules & PHP-FPM"
+a2enmod proxy_fcgi setenvif rewrite
+a2enconf php8.2-fpm
+
+# 3. Ubah port Apache dari 80 ke 8080 agar tidak konflik di Android
+log "Set Apache Listen → 8080"
+sed -i 's/^Listen 80/Listen 8080/' /etc/apache2/ports.conf
+
+# 4. Load env vars Apache
+set +u
+source /etc/apache2/envvars
+set -u
+
+# 5. Unduh & ekstrak GLPI versi terbaru
+VER=$(wget -qO- https://api.github.com/repos/glpi-project/glpi/releases/latest \
+     | grep '"tag_name":' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+log "Download GLPI versi $VER"
+wget -O /tmp/glpi.tgz \
+     "https://github.com/glpi-project/glpi/releases/download/$VER/glpi-$VER.tgz"
+
+log "Extract ke /var/www/html/glpi"
+rm -rf /var/www/html/glpi
+mkdir -p /var/www/html/glpi
+tar xf /tmp/glpi.tgz -C /var/www/html/glpi --strip-components=1
+
+# 6. Pindahkan folder files keluar dari web root
+log "Relocate files folder"
+mkdir -p /var/lib/glpi/files
+if [ -d /var/www/html/glpi/files ]; then
+  mv /var/www/html/glpi/files/* /var/lib/glpi/files/
+  rm -rf /var/www/html/glpi/files
+fi
+ln -sf /var/lib/glpi/files /var/www/html/glpi/files
+chown -R www-data:www-data /var/lib/glpi/files
+
+# 7. Set hak akses pada folder & file GLPI
+log "Set ownership & perms"
+chown -R www-data:www-data /var/www/html/glpi
+find /var/www/html/glpi -type d -exec chmod 755 {} \;
+find /var/www/html/glpi -type f -exec chmod 644 {} \;
+
+# 8. Setup database MariaDB tanpa systemd
+log "Setup MariaDB manual"
+mkdir -p /run/mysqld
+chown mysql:mysql /run/mysqld
+if [ ! -d /var/lib/mysql/mysql ]; then
+  mysql_install_db --user=mysql --datadir=/var/lib/mysql
+fi
+mysqld --user=mysql --background --pid-file=/run/mysqld/mysqld.pid
+sleep 5
+
+# 9. Buat database & user untuk GLPI
+log "Create DB & user GLPI"
+mysql -uroot -e "CREATE DATABASE IF NOT EXISTS glpi CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+mysql -uroot -e "CREATE USER IF NOT EXISTS 'glpiuser'@'localhost' IDENTIFIED BY 'glpipass';"
+mysql -uroot -e "GRANT ALL PRIVILEGES ON glpi.* TO 'glpiuser'@'localhost'; FLUSH PRIVILEGES;"
+
+# 10. Konfigurasi virtual host Apache khusus untuk GLPI
+log "Configure Apache vhost"
+cat > /etc/apache2/sites-available/glpi.conf << 'VHOST'
+<VirtualHost *:8080>
+  DocumentRoot /var/www/html/glpi/public
+  <Directory /var/www/html/glpi/public>
+    AllowOverride All
+    Require all granted
+  </Directory>
+  php_admin_value session.cookie_httponly On
+  ErrorLog ${APACHE_LOG_DIR}/glpi_error.log
+  CustomLog ${APACHE_LOG_DIR}/glpi_access.log combined
+</VirtualHost>
+VHOST
+
+a2dissite 000-default
+a2ensite glpi
+
+# 11. Restart semua service
+log "Restart PHP-FPM & Apache"
+service php8.2-fpm restart
+service apache2 restart
+
+# 12. Tambahkan perintah start otomatis saat login ke Proot
+echo "service apache2 start"    >> /root/.bashrc
+echo "service php8.2-fpm start" >> /root/.bashrc
+echo "mysqld --user=mysql --background --pid-file=/run/mysqld/mysqld.pid" >> /root/.bashrc
+
+log "✅ Setup selesai. Akses GLPI di http://localhost:8080"
