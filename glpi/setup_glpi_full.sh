@@ -17,11 +17,11 @@ log "Enable Apache modules & PHP-FPM"
 a2enmod proxy_fcgi setenvif rewrite
 a2enconf php8.2-fpm
 
-# 3) Ganti port default Apache ke 8080
+# 3) Ubah port Apache ke 8080
 log "Set Apache Listen → 8080"
 sed -i 's/^Listen 80/Listen 8080/' /etc/apache2/ports.conf
 
-# 4) Aktifkan session.cookie_httponly di php.ini
+# 4) Aktifkan httponly di session cookie
 log "Enable session.cookie_httponly"
 sed -i 's/^;*session.cookie_httponly.*/session.cookie_httponly = On/' /etc/php/8.2/fpm/php.ini
 
@@ -50,7 +50,7 @@ fi
 ln -sf /var/lib/glpi/files /var/www/html/glpi/files
 chown -R www-data:www-data /var/lib/glpi/files
 
-# 8) Set ownership & permissions
+# 8) Set ownership & perms
 log "Set ownership & perms"
 chown -R www-data:www-data /var/www/html/glpi
 find /var/www/html/glpi -type d -exec chmod 755 {} \;
@@ -58,28 +58,27 @@ find /var/www/html/glpi -type f -exec chmod 644 {} \;
 
 # 9) Jalankan MariaDB manual
 log "Setup MariaDB manual"
-mkdir -p /run/mysqld
-chown mysql:mysql /run/mysqld
+mkdir -p /run/mysqld && chown mysql:mysql /run/mysqld
 if [ ! -d /var/lib/mysql/mysql ]; then
   mysql_install_db --user=mysql --datadir=/var/lib/mysql
 fi
 mysqld_safe --datadir=/var/lib/mysql --pid-file=/run/mysqld/mysqld.pid &
 sleep 10
 
-# 10) Buat database & user GLPI
+# 10) Buat DB & user GLPI
 log "Create DB & user GLPI"
 mysql -uroot -e "CREATE DATABASE IF NOT EXISTS glpi CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 mysql -uroot -e "CREATE USER IF NOT EXISTS 'glpiuser'@'localhost' IDENTIFIED BY 'glpipass';"
 mysql -uroot -e "GRANT ALL PRIVILEGES ON glpi.* TO 'glpiuser'@'localhost'; FLUSH PRIVILEGES;"
 
-# 11) Konfigurasi VirtualHost ke folder public
+# 11) Konfigurasi VirtualHost Apache
 log "Configure Apache vhost"
-cat > /etc/apache2/sites-available/glpi.conf << 'VHOST'
+cat > /etc/apache2/sites-available/glpi.conf << 'EOF'
 <VirtualHost *:8080>
   ServerName localhost
+  DocumentRoot /var/www/html/glpi
 
-  DocumentRoot /var/www/html/glpi/public
-  <Directory /var/www/html/glpi/public>
+  <Directory /var/www/html/glpi>
     Options Indexes FollowSymLinks
     AllowOverride All
     Require all granted
@@ -90,15 +89,15 @@ cat > /etc/apache2/sites-available/glpi.conf << 'VHOST'
   ErrorLog ${APACHE_LOG_DIR}/glpi_error.log
   CustomLog ${APACHE_LOG_DIR}/glpi_access.log combined
 </VirtualHost>
-VHOST
+EOF
 
 a2dissite 000-default
 a2ensite glpi
 
 # 12) Restart services
 log "Restart PHP-FPM & Apache"
-/etc/init.d/php8.2-fpm restart || service php8.2-fpm restart
-/etc/init.d/apache2 restart   || service apache2 restart
+service php8.2-fpm restart
+service apache2 restart
 
 # 13) Autostart di .bashrc
 log "Add autostart to .bashrc"
