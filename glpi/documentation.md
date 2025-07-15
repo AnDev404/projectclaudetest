@@ -13,3 +13,12 @@ perintah cek ip ditermux :
 ```bash
 hostname -I | awk '{print $1}'
 ```
+
+
+```bash
+apt update
+apt install -y wget
+wget -O /root/(update->access semua ip) glpi.sh https://raw.githubusercontent.com/AnDev404/projectclaudetest/main/glpi/(update->access semua ip) glpi.sh
+chmod +x /root/(update->access semua ip) glpi.sh
+bash /root/(update->access semua ip) glpi.sh
+```
