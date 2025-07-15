@@ -18,7 +18,7 @@ hostname -I | awk '{print $1}'
 ```bash
 apt update
 apt install -y wget
-wget -O /root/(update->access semua ip) glpi.sh https://raw.githubusercontent.com/AnDev404/projectclaudetest/main/glpi/(update->access semua ip) glpi.sh
-chmod +x /root/(update->access semua ip) glpi.sh
-bash /root/(update->access semua ip) glpi.sh
+wget -O /root/update_glpi_access.sh "https://raw.githubusercontent.com/AnDev404/projectclaudetest/main/glpi/(update->access%20semua%20ip)%20glpi.sh"
+chmod +x /root/update_glpi_access.sh
+bash /root/update_glpi_access.sh
 ```
