@@ -9,3 +9,7 @@ wget -O /root/setup_glpi.sh https://raw.githubusercontent.com/AnDev404/projectcl
 chmod +x /root/setup_glpi.sh
 bash /root/setup_glpi.sh
 ```
+perintah cek ip ditermux :
+```bash
+hostname -I | awk '{print $1}'
+```
